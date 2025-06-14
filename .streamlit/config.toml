@@ -1,6 +1,0 @@
-[server]
-runOnSave = false
-
-
-[logger]
-level = "error"
