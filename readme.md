@@ -40,8 +40,7 @@
 
 ## Demo
 
-![Application Screenshot](![image](https://github.com/user-attachments/assets/c04905dd-0847-4836-931f-19615fb00f2f)
-
+![image](https://github.com/user-attachments/assets/ff21e6e6-4ae6-4e20-9aeb-be2626f7fbf9)
 
 [Watch Video Demo](https://youtu.be/demo-link) *(Replace with actual link)*
 
