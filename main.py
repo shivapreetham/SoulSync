@@ -3,6 +3,7 @@ import threading
 import queue
 import os
 import time
+import torch
 import cv2
 import mediapipe as mp
 from PIL import Image
@@ -21,7 +22,6 @@ mp_face_mesh = mp.solutions.face_mesh
 mp_drawing = mp.solutions.drawing_utils
 mp_drawing_styles = mp.solutions.drawing_styles
 
-# Corrected variable name initialization
 face_mesh = mp_face_mesh.FaceMesh(
     static_image_mode=False,
     max_num_faces=1,
@@ -257,7 +257,7 @@ def speak_text(text):
     engine.say(text)
     engine.runAndWait()
 
-def generate_response_state(user_input, emotion, video_emotion=None, history=None, temperature=0.8, top_k=50, top_p=0.9, max_tokens=50):
+def generate_response_state(user_input, emotion, history=None, temperature=0.8, top_k=50, top_p=0.9, max_tokens=50):
     global messages, conversation_history, tokenizer, model, device, model_name
     if not model:
         return "Model not loaded"
@@ -270,8 +270,7 @@ def generate_response_state(user_input, emotion, video_emotion=None, history=Non
         user_input=user_input,
         emotion_label=emotion,
         model_type=model_name,
-        tokenizer=tokenizer,
-        video_emotion=video_emotion
+        tokenizer=tokenizer
     )
     
     response = generate_response(
@@ -292,21 +291,23 @@ def generate_response_state(user_input, emotion, video_emotion=None, history=Non
     if not is_valid:
         final_response = get_smart_fallback(user_input, emotion)
     
+    # Speak the response in a separate thread
     threading.Thread(target=speak_text, args=(final_response,), daemon=True).start()
     
-    if video_emotion:
-        user_msg = f"User (video: {video_emotion}, text: {emotion}): {user_input}"
-    else:
-        user_msg = f"User (text: {emotion}): {user_input}"
-    
-    conversation_history.append((user_msg, final_response))
-    messages.append((user_msg, final_response, emotion))
+    conversation_history.append((user_input, final_response))
+    messages.append((user_input, final_response, emotion))
     conversation_history = truncate_history(conversation_history, tokenizer, max_tokens=800)
     
     return final_response
 
 def format_chat():
-    return [(user_msg, bot_msg) for user_msg, bot_msg, _ in messages]
+    global messages
+    emotion_emoji = {
+        "happy": "😊", "sad": "😢", "angry": "😠", "frustrated": "😤",
+        "confused": "🤔", "excited": "🤩", "anxious": "😰", "tired": "😴"
+    }
+    return [(f"{emotion_emoji.get(emotion, '💬')} {user_msg}", bot_msg) 
+            for user_msg, bot_msg, emotion in messages]
 
 def clear_chat():
     global messages, conversation_history
@@ -329,7 +330,7 @@ def start_recording():
 def stop_and_process():
     global recording, audio_thread
     if not recording:
-        return format_chat(), "No active recording"
+        return format_chat(), "No active recording", "No transcription", "No response"
     recording = False
     if audio_thread:
         audio_thread.join(timeout=2.0)
@@ -339,11 +340,16 @@ def stop_and_process():
     emotions = [detect_emotion_from_frame(frame) for frame in snapshots if detect_emotion_from_frame(frame)]
     most_common_emotion = Counter(emotions).most_common(1)[0][0] if emotions else "neutral"
     transcription = transcribe_audio(audio_path)
-    text_emotion = detect_emotion_from_text(transcription)
-    response = generate_response_state(transcription, text_emotion, video_emotion=most_common_emotion)
+    
+    user_input = f"{most_common_emotion}: {transcription}"
+    response = generate_response_state(user_input, most_common_emotion) if model else "Model not loaded"
+    
     if audio_path and os.path.exists(audio_path):
         os.remove(audio_path)
-    return format_chat(), "Processing complete, check chat for response"
+    
+    # Return the updated chat history along with other outputs
+    chat_history = format_chat()
+    return chat_history, most_common_emotion, transcription, response
 
 def cleanup():
     global cap
@@ -362,6 +368,7 @@ with gr.Blocks(title="Emotion-Aware Chat App", theme=gr.themes.Soft()) as demo:
     
     # Main layout
     with gr.Row():
+        # Chat column (60% width)
         with gr.Column(scale=3):
             chatbot = gr.Chatbot(height=400, label="Chat")
             user_input = gr.Textbox(lines=1, label="Type your message...", placeholder="Type here and press Enter")
@@ -375,6 +382,7 @@ with gr.Blocks(title="Emotion-Aware Chat App", theme=gr.themes.Soft()) as demo:
                 top_p = gr.Slider(0.7, 0.95, value=0.9, step=0.05, label="Top-p")
                 max_tokens = gr.Slider(20, 100, value=50, step=10, label="Max tokens")
         
+        # Video call column (40% width, hidden by default)
         with gr.Column(scale=2, visible=False) as video_call_col:
             image_out = gr.Image(label="Live Webcam", streaming=True)
             status_out = gr.Textbox(label="Recording Status", value="Not recording", interactive=False)
@@ -382,6 +390,9 @@ with gr.Blocks(title="Emotion-Aware Chat App", theme=gr.themes.Soft()) as demo:
                 start_btn = gr.Button("Start Recording")
                 stop_btn = gr.Button("Stop and Process")
                 close_video_call_btn = gr.Button("Close Video Call")
+            emotion_out = gr.Textbox(label="Detected Emotion", interactive=False)
+            transcript_out = gr.Textbox(label="Transcription", interactive=False)
+            response_out = gr.Textbox(label="Generated Response", interactive=False)
 
     # Event handlers
     load_btn.click(
@@ -411,7 +422,15 @@ with gr.Blocks(title="Emotion-Aware Chat App", theme=gr.themes.Soft()) as demo:
     clear_btn.click(fn=clear_chat, outputs=chatbot)
     
     start_btn.click(fn=start_recording, outputs=status_out)
-    stop_btn.click(fn=stop_and_process, outputs=[chatbot, status_out])
+    
+    def process_video_call():
+        chat_history, emotion, transcription, response = stop_and_process()
+        return chat_history, emotion, transcription, response
+    
+    stop_btn.click(
+        fn=process_video_call,
+        outputs=[chatbot, emotion_out, transcript_out, response_out]
+    )
     
     start_video_call_btn.click(
         fn=lambda: gr.update(visible=True),
