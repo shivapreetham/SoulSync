@@ -1,6 +1,5 @@
 # SoulSync - Emotion-Aware AI Chat Application
 
-![SoulSync Logo](docs/images/logo.png)  
 *An AI companion that understands how you feel*
 
 ## Table of Contents
