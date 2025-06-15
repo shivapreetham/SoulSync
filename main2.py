@@ -1,56 +1,38 @@
+#updated
+# Imported new modules and used their functions.
+# Moved model_options to config_utils.py.
+# Added logging for key operations.
+# Simplified global state management.
+# Kept Gradio interface intact but updated to use new modules.
+
+# Added error handling in start_recording and stop_and_process.
+# Added 5-second timeout for audio_queue.get() to prevent blocking.
+# Cleared audio_queue in stop_and_process to avoid stale data.
+# Logged snapshot count and errors.
+# Added error handling in close_video_call and cleanup.
 import gradio as gr
 import threading
 import queue
-import os
 import time
-import torch
-import cv2
-import mediapipe as mp
-from PIL import Image
-import numpy as np
-import pyaudio
-import soundfile as sf
-from vosk import Model, KaldiRecognizer
-import json
 import pyttsx3
 from llm_utils import load_model, generate_response, get_smart_fallback
 from chat_utils import build_prompt, truncate_history, validate_response, detect_conversation_quality
-from collections import Counter
+from emotion_utils import detect_emotion_from_text, aggregate_emotions
+from video_utils import video_stream, process_video_frame, find_available_camera
+from audio_utils import record_audio, transcribe_audio
+from config_utils import get_model_options
+from logging_utils import setup_logger
 
-# Initialize MediaPipe Face Mesh for video and emotion detection
-mp_face_mesh = mp.solutions.face_mesh
-mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
+# Initialize logger
+logger = setup_logger("soulsync")
 
-face_mesh = mp_face_mesh.FaceMesh(
-    static_image_mode=False,
-    max_num_faces=1,
-    refine_landmarks=True,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
-)
-
-# Initialize Vosk model for audio transcription
-VOSK_MODEL_PATH = "vosk-model-en-us-0.42-gigaspeech"
-if not os.path.isdir(VOSK_MODEL_PATH):
-    raise RuntimeError(f"Vosk model not found at {VOSK_MODEL_PATH}")
-vosk_model = Model(VOSK_MODEL_PATH)
-
-# Initialize TTS engine
+# Initialize TTS engine with thread-safe handling
 engine = pyttsx3.init()
-engine.setProperty('rate', 150)  # Speed (words per minute)
-engine.setProperty('volume', 0.9)  # Volume (0.0 to 1.0)
+engine.setProperty('rate', 150)
+engine.setProperty('volume', 0.9)
+tts_lock = threading.Lock()
 
-# Global variables for video call
-recording = False
-snapshots = []
-audio_thread = None
-audio_queue = queue.Queue()
-cap = None
-last_frame = None
-last_snapshot_time = 0
-
-# Global variables for chat state
+# Global state
 messages = []
 conversation_history = []
 tokenizer = None
@@ -280,20 +262,38 @@ def detect_emotion_from_text(text: str) -> str:
 # Chat state management functions
 def load_model_state(selected_model_name):
     global tokenizer, model, device, model_name
+    model_options = get_model_options()
     model_name = selected_model_name
     try:
-        tokenizer, model, device = load_model(model_name)
-        return f"✅ Model loaded on {device}"
+        tokenizer, model, device = load_model(model_options[model_name])
+        logger.info(f"Model {model_name} loaded on {device}")
+        return f"✅ Model loaded on {device}", True  # Enable stop button
     except Exception as e:
-        return f"❌ Model loading failed: {str(e)}"
+        logger.error(f"Model loading failed: {str(e)}")
+        return f"❌ Model loading failed: {str(e)}", False
 
-def speak_text(text):
-    engine.say(text)
-    engine.runAndWait()
+def speak_text(text: str) -> None:
+    """Speak text using TTS with thread-safe locking."""
+    try:
+        with tts_lock:
+            engine.say(text)
+            engine.runAndWait()
+    except Exception as e:
+        logger.error(f"TTS error: {str(e)}")
 
-def generate_response_state(user_input, emotion, history=None, temperature=0.8, top_k=50, top_p=0.9, max_tokens=50):
+def generate_response_state(
+    user_input: str,
+    emotion: str,
+    history: list = None,
+    temperature: float = 0.8,
+    top_k: int = 50,
+    top_p: float = 0.9,
+    max_tokens: int = 50
+) -> str:
+    """Generate a response based on user input and emotion."""
     global messages, conversation_history, tokenizer, model, device, model_name
     if not model:
+        logger.warning("Model not loaded")
         return "Model not loaded"
     
     if history is None:
@@ -325,83 +325,127 @@ def generate_response_state(user_input, emotion, history=None, temperature=0.8, 
     if not is_valid:
         final_response = get_smart_fallback(user_input, emotion)
     
-    # Speak the response in a separate thread
     threading.Thread(target=speak_text, args=(final_response,), daemon=True).start()
     
     conversation_history.append((user_input, final_response))
     messages.append((user_input, final_response, emotion))
     conversation_history = truncate_history(conversation_history, tokenizer, max_tokens=800)
     
+    quality_metrics = detect_conversation_quality(conversation_history)
+    logger.info(f"Conversation quality: {quality_metrics['quality']} | Metrics: {quality_metrics['metrics']} | Suggestions: {quality_metrics['suggestions']}")
+    
+    logger.info(f"Generated response for input: {user_input[:50]}... | Emotion: {emotion}")
     return final_response
 
-def format_chat():
-    global messages
+def format_chat() -> list:
+    """Format chat history for display in Gradio Chatbot."""
     emotion_emoji = {
         "happy": "😊", "sad": "😢", "angry": "😠", "frustrated": "😤",
         "confused": "🤔", "excited": "🤩", "anxious": "😰", "tired": "😴"
     }
-    return [(f"{emotion_emoji.get(emotion, '💬')} {user_msg}", bot_msg) 
-            for user_msg, bot_msg, emotion in messages]
+    chat_messages = []
+    for user_msg, bot_msg, emotion in messages:
+        chat_messages.append({"role": "user", "content": f"{emotion_emoji.get(emotion, '💬')} {user_msg}"})
+        chat_messages.append({"role": "assistant", "content": bot_msg})
+    return chat_messages
 
-def clear_chat():
+def clear_chat() -> list:
+    """Clear chat history."""
     global messages, conversation_history
     messages = []
     conversation_history = []
-    return format_chat()
+    logger.info("Chat history cleared")
+    return []
 
-# Application control functions
-def start_recording():
-    global recording, snapshots, audio_thread, last_snapshot_time
+def start_recording() -> tuple[str, str]:
+    """Start recording audio and video."""
+    global recording, snapshots, cap, last_snapshot_time, stream_active
     if recording:
-        return "Already recording"
-    recording = True
-    snapshots = []
-    last_snapshot_time = time.time()
-    audio_thread = threading.Thread(target=record_audio, daemon=True)
-    audio_thread.start()
-    return "Recording audio and video... Speak clearly for 10–15 seconds."
+        return "Already recording", ""
+    try:
+        recording = True
+        stream_active = True
+        snapshots.clear()
+        last_snapshot_time = time.time()
+        if cap is not None:
+            cap.release()
+        cap = find_available_camera()
+        if cap is None:
+            recording = False
+            logger.warning("No camera found")
+            return "No camera found", ""
+        
+        threading.Thread(target=record_audio, args=(audio_queue, lambda: recording), daemon=True).start()
+        logger.info("Started recording audio and video")
+        warning = "Please load a model before stopping the recording." if model is None else ""
+        return "Recording audio and video... Speak clearly for 10–15 seconds.", warning
+    except Exception as e:
+        recording = False
+        logger.error(f"Start recording error: {str(e)}")
+        return f"Failed to start recording: {str(e)}", ""
 
-def stop_and_process():
-    global recording, audio_thread
+def stop_and_process() -> tuple[str, str, str]:
+    """Stop recording and process audio/video."""
+    global recording, snapshots, cap, last_snapshot_time, stream_active
     if not recording:
         return "No active recording", "No transcription", "No response"
-    recording = False
-    if audio_thread:
-        audio_thread.join(timeout=2.0)
-        audio_thread = None
     
-    audio_path = audio_queue.get()
-    emotions = [detect_emotion_from_frame(frame) for frame in snapshots if detect_emotion_from_frame(frame)]
-    most_common_emotion = Counter(emotions).most_common(1)[0][0] if emotions else "neutral"
-    transcription = transcribe_audio(audio_path)
-    
-    response = generate_response_state(transcription, most_common_emotion) if model else "Model not loaded"
-    
-    if audio_path and os.path.exists(audio_path):
-        os.remove(audio_path)
-    
-    return most_common_emotion, transcription, response
+    try:
+        recording = False
+        stream_active = False
+        if cap:
+            cap.release()
+            cap = None
+        
+        try:
+            audio_path = audio_queue.get(timeout=10.0)
+        except queue.Empty:
+            logger.error("Audio queue timed out")
+            return "Processing error", "No audio recorded", "No response"
+        
+        logger.info(f"Processing {len(snapshots)} snapshots")
+        emotion = aggregate_emotions(snapshots) if snapshots else "neutral"
+        transcription = transcribe_audio(audio_path)
+        response = generate_response_state(transcription, emotion) if model and transcription and transcription != "No speech detected" else "Model not loaded or no transcription"
+        logger.info(f"Response generated: {response}")
+        
+        snapshots.clear()
+        last_snapshot_time = 0
+        logger.info(f"Processed recording | Emotion: {emotion} | Transcription: {transcription[:50]}...")
+        return emotion, transcription, response
+    except Exception as e:
+        logger.error(f"Stop and process error: {str(e)}")
+        return "Processing error", f"Error: {str(e)}", "No response"
+    finally:
+        while not audio_queue.empty():
+            audio_queue.get()
 
-def cleanup():
-    global cap
-    if cap and cap.isOpened():
-        cap.release()
-    cap = None
-    engine.stop()
+def cleanup() -> None:
+    """Clean up resources."""
+    global cap, recording, stream_active
+    try:
+        if cap:
+            cap.release()
+            cap = None
+        recording = False
+        stream_active = False
+        with tts_lock:
+            engine.stop()
+        logger.info("Resources cleaned up")
+    except Exception as e:
+        logger.error(f"Cleanup error: {str(e)}")
 
 # Gradio interface
 with gr.Blocks(title="Emotion-Aware Chat App", theme=gr.themes.Soft()) as demo:
-    # Model selection
+    model_options = get_model_options()
     with gr.Row():
         model_dropdown = gr.Dropdown(choices=list(model_options.keys()), label="Select Model", value="DialoGPT Large (355M)")
         load_btn = gr.Button("Load Model")
         model_status = gr.Textbox(label="Model Status", interactive=False)
     
-    # Main layout
     with gr.Row():
-        # Chat column (60% width)
         with gr.Column(scale=3):
-            chatbot = gr.Chatbot(height=400, label="Chat")
+            chatbot = gr.Chatbot(height=400, label="Chat", type="messages")
             user_input = gr.Textbox(lines=1, label="Type your message...", placeholder="Type here and press Enter")
             with gr.Row():
                 submit_btn = gr.Button("Send")
@@ -413,22 +457,21 @@ with gr.Blocks(title="Emotion-Aware Chat App", theme=gr.themes.Soft()) as demo:
                 top_p = gr.Slider(0.7, 0.95, value=0.9, step=0.05, label="Top-p")
                 max_tokens = gr.Slider(20, 100, value=50, step=10, label="Max tokens")
         
-        # Video call column (40% width, hidden by default)
         with gr.Column(scale=2, visible=False) as video_call_col:
             image_out = gr.Image(label="Live Webcam", streaming=True)
             status_out = gr.Textbox(label="Recording Status", value="Not recording", interactive=False)
+            warning_out = gr.Textbox(label="Warnings", interactive=False)
             start_btn = gr.Button("Start Recording")
-            stop_btn = gr.Button("Stop and Process")
+            stop_btn = gr.Button("Stop and Process", interactive=False)
             emotion_out = gr.Textbox(label="Detected Emotion", interactive=False)
             transcript_out = gr.Textbox(label="Transcription", interactive=False)
             response_out = gr.Textbox(label="Generated Response", interactive=False)
             close_video_call_btn = gr.Button("Close Video Call")
 
-    # Event handlers
     load_btn.click(
-        fn=lambda model_name: load_model_state(model_options[model_name]),
+        fn=load_model_state,
         inputs=model_dropdown,
-        outputs=model_status
+        outputs=[model_status, stop_btn]
     )
     
     def text_chat_submit(input_text, temp, tk, tp, mt):
@@ -451,8 +494,14 @@ with gr.Blocks(title="Emotion-Aware Chat App", theme=gr.themes.Soft()) as demo:
     
     clear_btn.click(fn=clear_chat, outputs=chatbot)
     
-    start_btn.click(fn=start_recording, outputs=status_out)
-    stop_btn.click(fn=stop_and_process, outputs=[emotion_out, transcript_out, response_out])
+    start_btn.click(
+        fn=start_recording,
+        outputs=[status_out, warning_out]
+    )
+    stop_btn.click(
+        fn=stop_and_process,
+        outputs=[emotion_out, transcript_out, response_out]
+    )
     
     start_video_call_btn.click(
         fn=lambda: gr.update(visible=True),
@@ -461,22 +510,38 @@ with gr.Blocks(title="Emotion-Aware Chat App", theme=gr.themes.Soft()) as demo:
     )
     
     def close_video_call():
-        global recording, audio_thread
-        if recording:
+        global recording, cap, stream_active
+        try:
             recording = False
-            if audio_thread:
-                audio_thread.join(timeout=2.0)
-                audio_thread = None
-        return gr.update(visible=False), "Not recording"
+            stream_active = False
+            if cap:
+                cap.release()
+                cap = None
+            return gr.update(visible=False), "Not recording", ""
+        except Exception as e:
+            logger.error(f"Close video call error: {str(e)}")
+            return gr.update(visible=False), f"Error closing video call: {str(e)}", ""
     
     close_video_call_btn.click(
         fn=close_video_call,
         inputs=None,
-        outputs=[video_call_col, status_out]
+        outputs=[video_call_col, status_out, warning_out]
     )
     
-    demo.load(video_stream, None, image_out)
-    demo.unload(cleanup)
+    def stream_with_globals():
+        global stream_active
+        start_time = time.time()
+        timeout = 60  # Timeout after 60 seconds
+        for frame in video_stream(snapshots, recording, last_snapshot_time):
+            if not stream_active or time.time() - start_time > timeout:
+                logger.info("Stopping video stream")
+                break
+            yield frame
+    
+    demo.load(fn=stream_with_globals, inputs=None, outputs=image_out)
+    logger.info("Video stream loaded")
+
+demo.unload(cleanup)
 
 if __name__ == "__main__":
     demo.launch()
