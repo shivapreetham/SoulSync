@@ -78,6 +78,7 @@ def find_available_camera(max_index=5):
             temp_cap.release()
     return None
 
+
 def video_stream():
     global cap, last_frame, last_snapshot_time, recording, snapshots
     cap = find_available_camera()
@@ -88,6 +89,22 @@ def video_stream():
     
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    
+    # Create a transparent green color (BGR format with alpha)
+    transparent_green = (0, 255, 0, 0.4)  # Green with 40% opacity
+    
+    # Create drawing specs with transparency
+    face_mesh_style = mp_drawing_styles.DrawingSpec(
+        color=(0, 255, 0),  # Green color
+        thickness=1,
+        circle_radius=1
+    )
+    
+    contour_style = mp_drawing_styles.DrawingSpec(
+        color=(0, 255, 0),  # Green color
+        thickness=1,
+        circle_radius=1
+    )
     
     while True:
         ret, frame = cap.read()
@@ -104,14 +121,32 @@ def video_stream():
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = face_mesh.process(rgb_frame)
         
+        # Create a transparent overlay for the face mesh
+        overlay = frame.copy()
+        
         if results.multi_face_landmarks:
             for face_landmarks in results.multi_face_landmarks:
+                # Draw the face mesh on the overlay with thin, subtle lines
                 mp_drawing.draw_landmarks(
-                    image=frame,
+                    image=overlay,
                     landmark_list=face_landmarks,
                     connections=mp_face_mesh.FACEMESH_TESSELATION,
                     landmark_drawing_spec=None,
-                    connection_drawing_spec=mp_drawing_styles.get_default_face_mesh_tesselation_style())
+                    connection_drawing_spec=face_mesh_style
+                )
+                
+                # Draw the face contours more subtly
+                mp_drawing.draw_landmarks(
+                    image=overlay,
+                    landmark_list=face_landmarks,
+                    connections=mp_face_mesh.FACEMESH_CONTOURS,
+                    landmark_drawing_spec=None,
+                    connection_drawing_spec=contour_style
+                )
+        
+        # Blend the overlay with the original frame
+        alpha = 0.03  # Transparency factor (30% opacity)
+        frame = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
         
         last_frame = frame.copy()
         yield Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
