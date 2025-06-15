@@ -1,7 +1,7 @@
 import gradio as gr
 import torch
-from llm_utils2 import load_model, generate_response, get_smart_fallback
-from chat_utils2 import build_prompt, truncate_history, validate_response, detect_conversation_quality
+from llm_utils import load_model, generate_response, get_smart_fallback
+from chat_utils import build_prompt, truncate_history, validate_response, detect_conversation_quality
 
 # Load model at startup (hardcoded for simplicity)
 model_name = "facebook/blenderbot-3B"
