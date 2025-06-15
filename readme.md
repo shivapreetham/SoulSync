@@ -1,1 +1,1 @@
-hello world
+Emotional AI assistent
