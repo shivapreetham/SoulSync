@@ -42,7 +42,6 @@
 
 ![image](https://github.com/user-attachments/assets/ff21e6e6-4ae6-4e20-9aeb-be2626f7fbf9)
 
-[Watch Video Demo](https://youtu.be/demo-link) *(Replace with actual link)*
 
 ## Installation
 
