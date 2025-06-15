@@ -28,7 +28,7 @@ face_mesh = mp_face_mesh.FaceMesh(
 )
 
 # Initialize Vosk model
-VOSK_MODEL_PATH = "vosk-model-small-en-us-0.15"
+VOSK_MODEL_PATH = "vosk-model-en-us-0.42-gigaspeech"
 if not os.path.isdir(VOSK_MODEL_PATH):
     raise RuntimeError(f"Vosk model not found at {VOSK_MODEL_PATH}. Download from https://alphacephei.com/vosk/models")
 vosk_model = Model(VOSK_MODEL_PATH)
