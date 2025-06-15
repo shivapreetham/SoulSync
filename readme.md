@@ -6,7 +6,6 @@
 - [Features](#features)
 - [Demo](#demo)
 - [Installation](#installation)
-- [Installation](#installation)
 - [Usage](#usage)
 - [Configuration](#configuration)
 - [Supported Models](#supported-models)
@@ -126,7 +125,7 @@ height = 600
 - **Interface**: Gradio, Matplotlib
 
 ### Infrastructure
-![Infrastructure Diagram](deepseek_mermaid_20250615_225acb.png)
+![Infrastructure Diagram](deepseek_mermaid_20250615_225acb.png){{: width="600"}}
 
 ## Development
 
